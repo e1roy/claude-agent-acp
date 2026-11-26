@@ -48,9 +48,12 @@ import {
 import {
   DEFAULT_CONTEXT_WINDOW,
   getMatchingModelUsage,
+  requestIdentity,
+  requestUsageMeta,
   snapshotFromUsage,
   totalTokens,
   ZERO_USAGE,
+  type RequestIdentity,
   type UsageSnapshot,
 } from "../session-usage.js";
 import { SessionTitles, type TitledSession } from "../session-titles.js";
@@ -126,6 +129,8 @@ export class SessionReports {
 
   // The open turn's figures, reset when a turn starts.
   private lastUsage: UsageSnapshot | null = null;
+  /** The request `lastUsage` is of (see REQUEST_USAGE_META_KEY). */
+  private lastRequest: RequestIdentity | null = null;
   private lastTotal: number | null = null;
   private lastModel: string | null = null;
   /** A `rate_limit_event` that came before the turn had usage to report it with. */
@@ -221,6 +226,7 @@ export class SessionReports {
 
   turnStarted(): void {
     this.lastUsage = null;
+    this.lastRequest = null;
     this.lastTotal = null;
     this.lastModel = null;
     this.noticeTexts = [];
@@ -355,6 +361,7 @@ export class SessionReports {
     void this.compaction.reset();
     // The fresh conversation's context is empty.
     this.lastUsage = null;
+    this.lastRequest = null;
     this.lastTotal = null;
     this.contextUsed = 0;
     this.titles.reset();
@@ -413,6 +420,7 @@ export class SessionReports {
     }
     if (event.type === "message_start") {
       this.lastUsage = snapshotFromUsage(event.message.usage);
+      this.lastRequest = requestIdentity(event.message);
       const model = event.message.model;
       if (model && model !== "<synthetic>") {
         this.lastModel = model;
@@ -447,6 +455,7 @@ export class SessionReports {
   assistant(message: SDKAssistantMessage): void {
     if (message.message.model === "<synthetic>") return;
     this.lastUsage = snapshotFromUsage(message.message.usage);
+    this.lastRequest = requestIdentity(message.message);
     this.lastTotal = totalTokens(this.lastUsage);
     this.contextUsed = this.lastTotal;
     this.idleCompaction?.noteRequest(message.message.usage, message.message.id || undefined);
@@ -548,6 +557,7 @@ export class SessionReports {
         // window stays: compaction frees context, it does not change the model.
         const used = metadata?.post_tokens ?? 0;
         this.lastUsage = null;
+        this.lastRequest = null;
         this.lastTotal = used;
         this.contextUsed = used;
         this.sendUsage({ sessionUpdate: "usage_update", used, size: this.contextWindow });
@@ -629,10 +639,11 @@ export class SessionReports {
   }
 
   /**
-   * Sends a `usage_update` with the model the usage belongs to and any
-   * pending rate limit in `_meta`, as ACP's usage_update has no field for them.
-   * A v2 client keeps each `_meta` key until an update replaces or removes it,
-   * so `_claude/model` and `_claude/rateLimit` are the last ones reported.
+   * Sends a `usage_update` with the model the usage belongs to, any pending
+   * rate limit and the latest request's own usage in `_meta`, as ACP's
+   * usage_update has no field for them. A v2 client keeps each `_meta` key
+   * until an update replaces or removes it, so `_claude/model`,
+   * `_claude/rateLimit` and `_claude/requestUsage` are the last ones reported.
    */
   private sendUsage(update: UsageUpdate): void {
     let meta: Record<string, unknown> = { ...(update._meta ?? {}) };
@@ -641,6 +652,7 @@ export class SessionReports {
       this.pendingRateLimit = null;
     }
     if (this.lastModel) meta["_claude/model"] = this.lastModel;
+    Object.assign(meta, requestUsageMeta(this.lastRequest, this.lastUsage));
     this.host.emit([
       {
         sessionId: this.host.sessionId,

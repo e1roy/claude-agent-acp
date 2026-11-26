@@ -16937,6 +16937,97 @@ describe("usage_update computation", () => {
     }
   });
 
+  it("reports the latest request's own usage, cache split included, on usage_update", async () => {
+    const { agent, updates } = createMockAgentWithCapture();
+    injectSession(agent, [
+      createStreamEvent("message_start", {
+        id: "msg_1",
+        model: "claude-sonnet-4-20250514",
+        usage: {
+          input_tokens: 2,
+          output_tokens: 1,
+          cache_read_input_tokens: 57130,
+          cache_creation_input_tokens: 2902,
+          cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 2902 },
+        },
+      }),
+      createStreamEvent("message_delta", { usage: { output_tokens: 215 } }),
+      // A subagent's request has a cache of its own: it is not the session's.
+      createStreamEvent(
+        "message_start",
+        {
+          id: "msg_sub",
+          model: "claude-sonnet-4-20250514",
+          usage: {
+            input_tokens: 9,
+            output_tokens: 1,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+          },
+        },
+        "toolu_agent",
+      ),
+      createResultMessageWithModel({
+        modelUsage: {
+          "claude-sonnet-4-20250514": {
+            inputTokens: 2,
+            outputTokens: 215,
+            cacheReadInputTokens: 57130,
+            cacheCreationInputTokens: 2902,
+            webSearchRequests: 0,
+            costUSD: 0.01,
+            contextWindow: 200000,
+            maxOutputTokens: 16384,
+          },
+        },
+      }),
+      { type: "system", subtype: "session_state_changed", state: "idle" },
+    ]);
+
+    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] });
+
+    const requests = updates
+      .filter((u: any) => u.update?.sessionUpdate === "usage_update")
+      .map((u: any) => u.update._meta?.["_claude/requestUsage"]);
+    const usage = (output_tokens: number) => ({
+      messageId: "msg_1",
+      usage: {
+        input_tokens: 2,
+        output_tokens,
+        cache_read_input_tokens: 57130,
+        cache_creation_input_tokens: 2902,
+        cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 2902 },
+      },
+    });
+    // message_start, message_delta, then the result's update: the same request throughout.
+    expect(requests).toEqual([usage(1), usage(215), usage(215)]);
+  });
+
+  it("reports no request usage for a frame without a message id", async () => {
+    const { agent, updates } = createMockAgentWithCapture();
+    injectSession(agent, [
+      createStreamEvent("message_start", {
+        model: "claude-sonnet-4-20250514",
+        usage: {
+          input_tokens: 5,
+          output_tokens: 1,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+        },
+      }),
+      createResultMessageWithModel({ modelUsage: {} }),
+      { type: "system", subtype: "session_state_changed", state: "idle" },
+    ]);
+
+    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] });
+
+    const usageUpdates = updates.filter((u: any) => u.update?.sessionUpdate === "usage_update");
+    expect(usageUpdates.length).toBeGreaterThan(0);
+    for (const { update } of usageUpdates) {
+      expect(update._meta).not.toHaveProperty("_claude/requestUsage");
+    }
+  });
+
   it("stream_event message_delta patches previous snapshot", async () => {
     const { agent, updates } = createMockAgentWithCapture();
     injectSession(agent, [

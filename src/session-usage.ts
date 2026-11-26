@@ -95,6 +95,68 @@ export function normalizeModelUsage(
   return tally;
 }
 
+/** The `usage_update._meta` key with the main thread's latest model request:
+ *  its API message id and its own usage, the cache split included, which
+ *  `used` (the context size) adds up. A client shows a prompt cache hit rate
+ *  from it while the turn runs. Subagents' requests have caches of their own
+ *  and are not reported here. */
+export const REQUEST_USAGE_META_KEY = "_claude/requestUsage";
+
+/** How a request's cache writes split by lifetime, as the API reports it. */
+export type CacheCreation = {
+  ephemeral_5m_input_tokens: number;
+  ephemeral_1h_input_tokens: number;
+};
+
+/** The request a usage snapshot belongs to. */
+export type RequestIdentity = {
+  messageId: string;
+  /** `null` when the backend did not split the writes. */
+  cacheCreation: CacheCreation | null;
+};
+
+/** The request of a `message_start` event's or an assistant message's
+ *  `message`. Without an id (a synthetic frame) there is none to report. */
+export function requestIdentity(message: {
+  id?: string | null;
+  usage?: {
+    cache_creation?: {
+      ephemeral_5m_input_tokens?: number | null;
+      ephemeral_1h_input_tokens?: number | null;
+    } | null;
+  } | null;
+}): RequestIdentity | null {
+  if (!message.id) return null;
+  const split = message.usage?.cache_creation;
+  return {
+    messageId: message.id,
+    cacheCreation: split
+      ? {
+          ephemeral_5m_input_tokens: finiteCount(split.ephemeral_5m_input_tokens),
+          ephemeral_1h_input_tokens: finiteCount(split.ephemeral_1h_input_tokens),
+        }
+      : null,
+  };
+}
+
+/** The `_meta` entry for `request` with its usage so far (the output grows
+ *  while the response streams), or nothing when either is unknown. */
+export function requestUsageMeta(
+  request: RequestIdentity | null,
+  usage: Readonly<UsageSnapshot> | null,
+): Record<string, unknown> {
+  if (!request || !usage) return {};
+  return {
+    [REQUEST_USAGE_META_KEY]: {
+      messageId: request.messageId,
+      usage: {
+        ...usage,
+        ...(request.cacheCreation ? { cache_creation: request.cacheCreation } : {}),
+      },
+    },
+  };
+}
+
 function finiteCount(value: number | null | undefined): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }

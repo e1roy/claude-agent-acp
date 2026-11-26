@@ -349,6 +349,8 @@ import {
   modelUsageIncrement,
   normalizeModelUsage,
   quotaMeta,
+  requestIdentity,
+  requestUsageMeta,
   resumedFirstResultModelUsage,
   snapshotFromUsage,
   tallyTotal,
@@ -356,6 +358,7 @@ import {
   ZERO_USAGE,
   type AccumulatedUsage,
   type ModelTokenTally,
+  type RequestIdentity,
   type UsageSnapshot,
 } from "../session-usage.js";
 import { previewPatchContent } from "../diff.js";
@@ -3442,6 +3445,8 @@ export class ClaudeAcpAgent {
     // active at a time. Mirrors the locals the old per-prompt loop held.
     let lastAssistantTotalUsage: number | null = null;
     let lastAssistantUsage: UsageSnapshot | null = null;
+    // The request `lastAssistantUsage` is of (see REQUEST_USAGE_META_KEY).
+    let lastAssistantRequest: RequestIdentity | null = null;
     let lastAssistantModel: string | null = null;
     // A rate_limit_event that came before the turn had any usage to report.
     let pendingRateLimit: unknown = null;
@@ -3765,8 +3770,8 @@ export class ClaudeAcpAgent {
     };
 
     // ACP's usage_update has no model field, so the model the usage belongs
-    // to rides in `_meta` alongside the other `_claude/*` keys, as does a
-    // pending rate limit.
+    // to rides in `_meta` alongside the other `_claude/*` keys, as do a
+    // pending rate limit and the latest request's own usage.
     const attachUsageModel = <
       T extends {
         sessionUpdate: "usage_update";
@@ -3784,12 +3789,14 @@ export class ClaudeAcpAgent {
         };
         pendingRateLimit = null;
       }
-      if (!lastAssistantModel) return update;
+      const request = requestUsageMeta(lastAssistantRequest, lastAssistantUsage);
+      if (!lastAssistantModel && Object.keys(request).length === 0) return update;
       return {
         ...update,
         _meta: {
           ...(update._meta ?? {}),
-          "_claude/model": lastAssistantModel,
+          ...request,
+          ...(lastAssistantModel ? { "_claude/model": lastAssistantModel } : {}),
         },
       };
     };
@@ -3816,6 +3823,7 @@ export class ClaudeAcpAgent {
     const resetTurnScratch = () => {
       lastAssistantTotalUsage = null;
       lastAssistantUsage = null;
+      lastAssistantRequest = null;
       lastAssistantModel = null;
       lastAssistantError = undefined;
       turnRateLimit = undefined;
@@ -5207,6 +5215,7 @@ export class ClaudeAcpAgent {
                 );
                 const usedTokens = compactMetadata?.post_tokens ?? 0;
                 lastAssistantUsage = null;
+                lastAssistantRequest = null;
                 lastAssistantTotalUsage = usedTokens;
                 session.contextUsedTokens = usedTokens;
                 await sendUpdate({
@@ -6731,6 +6740,7 @@ export class ClaudeAcpAgent {
             ) {
               if (message.event.type === "message_start") {
                 lastAssistantUsage = snapshotFromUsage(message.event.message.usage);
+                lastAssistantRequest = requestIdentity(message.event.message);
                 const model = message.event.message.model;
                 if (model && model !== "<synthetic>") {
                   lastAssistantModel = model;
@@ -7102,6 +7112,7 @@ export class ClaudeAcpAgent {
             if (message.type === "assistant" && message.parent_tool_use_id === null) {
               if (message.message.model !== "<synthetic>") {
                 lastAssistantUsage = snapshotFromUsage(message.message.usage);
+                lastAssistantRequest = requestIdentity(message.message);
                 lastAssistantTotalUsage = totalTokens(lastAssistantUsage);
                 session.contextUsedTokens = lastAssistantTotalUsage;
                 session.idleCompaction?.noteRequest(
